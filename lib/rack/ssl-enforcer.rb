@@ -35,6 +35,9 @@ module Rack
         'http'
       end
 
+      session = env['rack.session']
+      p " -- rack session #{session.inspect}"
+      
       if redirect_required?
         modify_location_and_redirect
       elsif ssl_request?
