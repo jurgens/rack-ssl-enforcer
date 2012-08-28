@@ -1,274 +1,727 @@
 require 'helper'
 
 class TestRackSslEnforcer < Test::Unit::TestCase
-  
-  context 'that has no :redirect_to set' do
+
+  context 'no options' do
     setup { mock_app }
-    
-    should 'respond with a ssl redirect to plain-text requests' do
-      get 'http://www.example.org/'
-      assert_equal 301, last_response.status
-      assert_equal 'https://www.example.org/', last_response.location
-    end
-    
-    should 'respond with a ssl redirect to plain-text requests and keep params' do
+
+    should 'redirect to HTTPS and keep params' do
       get 'http://www.example.org/admin?token=33'
       assert_equal 301, last_response.status
       assert_equal 'https://www.example.org/admin?token=33', last_response.location
     end
-    
-    #heroku / etc do proxied SSL
-    #http://github.com/pivotal/refraction/issues/issue/2
+
+    # heroku / etc do proxied SSL
     should 'respect X-Forwarded-Proto header for proxied SSL' do
       get 'http://www.example.org/', {}, { 'HTTP_X_FORWARDED_PROTO' => 'http', 'rack.url_scheme' => 'http' }
       assert_equal 301, last_response.status
       assert_equal 'https://www.example.org/', last_response.location
     end
-    
-    should 'respond not redirect ssl requests' do
+
+    should 'not redirect SSL requests' do
       get 'https://www.example.org/'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
-    
-    should 'respond not redirect ssl requests and respect X-Forwarded-Proto header for proxied SSL' do
+
+    should 'not redirect SSL requests and respect X-Forwarded-Proto header for proxied SSL' do
       get 'http://www.example.org/', {}, { 'HTTP_X_FORWARDED_PROTO' => 'https', 'rack.url_scheme' => 'http' }
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
 
-    should 'use default https port when redirecting non-standard http port to ssl' do
+    should 'use default HTTPS port (443) when redirecting non-standard HTTP port to HTTPS' do
       get 'http://example.org:81/', {}, { 'rack.url_scheme' => 'http' }
       assert_equal 301, last_response.status
       assert_equal 'https://example.org/', last_response.location
-    end 
+    end
 
     should 'secure cookies' do
       get 'https://www.example.org/'
       assert_equal ["id=1; path=/; secure", "token=abc; path=/; secure; HttpOnly"], last_response.headers['Set-Cookie'].split("\n")
     end
-    
-    should 'set default hsts headers to all ssl requests' do
+
+    should 'not set default HSTS headers to SSL requests' do
       get 'https://www.example.org/'
-      assert_equal "max-age=31536000; includeSubDomains", last_response.headers["Strict-Transport-Security"] 
+      assert !last_response.headers["Strict-Transport-Security"]
     end
-    
-    should 'not set hsts headers to non ssl requests' do
+
+    should 'not set hsts headers to non-SSL requests' do
       get 'http://www.example.org/'
-      assert last_response.headers["Strict-Transport-Security"].nil? 
+      assert !last_response.headers["Strict-Transport-Security"]
     end
   end
-  
-  context 'that has :redirect_to set' do
-    setup { mock_app :redirect_to => 'https://www.google.com' }
-    
-    should 'respond with a ssl redirect to plain-text requests and redirect to :redirect_to' do
+
+  context 'With Rails 2.3 / Rack 1.1-style Array-based cookies' do
+    setup do
+      main_app = lambda { |env|
+        request = Rack::Request.new(env)
+        headers = {'Content-Type' => "text/html"}
+        headers['Set-Cookie'] = ["id=1; path=/", "token=abc; path=/; HttpOnly"]
+        [200, headers, ['Hello world!']]
+      }
+
+      builder = Rack::Builder.new
+      builder.use Rack::SslEnforcer
+      builder.run main_app
+      @app = builder.to_app
+    end
+
+    should 'secure cookies' do
+      get 'https://www.example.org/'
+      assert_equal ["id=1; path=/; secure", "token=abc; path=/; HttpOnly; secure"], last_response.headers['Set-Cookie'].split("\n")
+    end
+  end
+
+  context ':http_port' do
+    setup { mock_app :http_port => 8080, :only => [], :strict => true }
+
+    should 'redirect to HTTP with custom port' do
+      get 'https://www.example.org/'
+      assert_equal 301, last_response.status
+      assert_equal 'http://www.example.org:8080/', last_response.location
+    end
+  end
+
+  context ':https_port' do
+    setup { mock_app :https_port => 9443 }
+
+    should 'redirect to HTTPS with custom port' do
       get 'http://www.example.org/'
       assert_equal 301, last_response.status
-      assert_equal 'https://www.google.com', last_response.location
+      assert_equal 'https://www.example.org:9443/', last_response.location
+    end
+  end
+
+  context ':redirect_to' do
+    setup { mock_app :redirect_to => 'https://www.google.com' }
+
+    should 'redirect to HTTPS and keep params' do
+      get 'http://www.example.org/admin?token=33'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.google.com/admin?token=33', last_response.location
+    end
+
+    should 'redirect to HTTPS and append scheme automatically' do
+      mock_app :redirect_to => 'www.google.com'
+
+      get 'http://www.example.org/'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.google.com/', last_response.location
     end
     
-    should 'respond not redirect ssl requests' do
+    should 'redirect SSL requests if hosts do not match' do
       get 'https://www.example.org/'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.google.com/', last_response.location
+    end
+
+    should 'not redirect SSL requests if hosts match' do
+      get 'https://www.google.com'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
   end
-  
-  context 'that has regex pattern as only option' do
+
+  context ':only (Regex)' do
     setup { mock_app :only => /^\/admin/ }
-    
-    should 'respond with a ssl redirect for /admin path' do
-      get 'http://www.example.org/admin'
+
+    should 'redirect to HTTPS for /admin' do
+      get 'http://www.example.org/admin/account'
       assert_equal 301, last_response.status
-      assert_equal 'https://www.example.org/admin', last_response.location
+      assert_equal 'https://www.example.org/admin/account', last_response.location
     end
-    
-    should 'respond not redirect ssl requests' do
+
+    should 'not redirect for other paths' do
       get 'http://www.example.org/foo'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
-    
-    should 'secure cookies' do
-      get 'https://www.example.org/'
-      assert_equal ["id=1; path=/; secure", "token=abc; path=/; secure; HttpOnly"], last_response.headers['Set-Cookie'].split("\n")
-    end
   end
-  
-  context 'that has path as only option' do
-    setup { mock_app :only => "/login" }
-    
-    should 'respond with a ssl redirect for /login path' do
-      get 'http://www.example.org/login'
+
+  context ':only (String)' do
+    setup { mock_app :only => "/account" }
+
+    should 'redirect to HTTPS for /account' do
+      get 'http://www.example.org/account'
       assert_equal 301, last_response.status
-      assert_equal 'https://www.example.org/login', last_response.location
+      assert_equal 'https://www.example.org/account', last_response.location
     end
-    
-    should 'respond not redirect ssl requests' do
-      get 'http://www.example.org/foo/'
+
+    should 'redirect to HTTPS for /account/public' do
+      get 'http://www.example.org/account/public'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/account/public', last_response.location
+    end
+
+    should 'not redirect SSL requests for /account' do
+      get 'https://www.example.org/account'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for /foo' do
+      get 'http://www.example.org/foo'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
   end
-  
-  context 'that has array of regex pattern & path as only option' do
+
+  context ':only (Array)' do
     setup { mock_app :only => [/\.xml$/, "/login"] }
-    
-    should 'respond with a ssl redirect for /login path' do
+
+    should 'redirect to HTTPS for /login' do
       get 'http://www.example.org/login'
       assert_equal 301, last_response.status
       assert_equal 'https://www.example.org/login', last_response.location
     end
-    
-    should 'respond with a ssl redirect for /admin path' do
+
+    should 'redirect to HTTPS for /admin path' do
       get 'http://www.example.org/users.xml'
       assert_equal 301, last_response.status
       assert_equal 'https://www.example.org/users.xml', last_response.location
     end
-    
-    should 'respond not redirect ssl requests' do
+
+    should 'not redirect for /foo' do
       get 'http://www.example.org/foo/'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
   end
-  
-  context 'that has array of regex pattern & path as only option with strict option' do
+
+  context ':only (Array) & :strict == true' do
     setup { mock_app :only => [/\.xml$/, "/login"], :strict => true }
-    
-    should 'respond with a http redirect from non-allowed https url' do
-      get 'https://www.example.org/foo/'
+
+    should 'redirect to HTTP for /foo' do
+      get 'https://www.example.org/foo'
       assert_equal 301, last_response.status
-      assert_equal 'http://www.example.org/foo/', last_response.location
+      assert_equal 'http://www.example.org/foo', last_response.location
     end
-    
-    should 'respond from allowed https url' do
+
+    should 'not redirect for /login' do
       get 'https://www.example.org/login'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
-    
-    should 'use default https port when redirecting non-standard ssl port to http' do
-      get 'https://example.org:81/', {}, { 'rack.url_scheme' => 'https' }
-      assert_equal 301, last_response.status
-      assert_equal 'http://example.org/', last_response.location
-    end
-
-    should 'secure cookies' do
-      get 'https://www.example.org/login'
-      assert_equal ["id=1; path=/; secure", "token=abc; path=/; secure; HttpOnly"], last_response.headers['Set-Cookie'].split("\n")
-    end
-    
-    should 'not secure cookies' do
-      get 'http://www.example.org/'
-      assert_equal ["id=1; path=/", "token=abc; path=/; secure; HttpOnly"], last_response.headers['Set-Cookie'].split("\n")
-    end
   end
 
-  context 'that has regex pattern as except option' do
-    setup { mock_app :except => /^\/landing/ }
-    
-    should 'respond with a ssl redirect for /admin path' do
+  context ':except (Regex)' do
+    setup { mock_app :except => /^\/foo/ }
+
+    should 'redirect to HTTPS for /admin' do
       get 'http://www.example.org/admin'
       assert_equal 301, last_response.status
       assert_equal 'https://www.example.org/admin', last_response.location
     end
-    
-    should 'respond not redirect ssl requests' do
-      get 'http://www.example.org/landing'
+
+    should 'not redirect for /foo' do
+      get 'http://www.example.org/foo'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
-    
-    should 'secure cookies' do
-      get 'https://www.example.org/'
-      assert_equal ["id=1; path=/; secure", "token=abc; path=/; secure; HttpOnly"], last_response.headers['Set-Cookie'].split("\n")
-    end
   end
-  
-  context 'that has path as except option' do
-    setup { mock_app :except => "/landing" }
-    
-    should 'respond with a ssl redirect for /login path' do
+
+  context ':except (String)' do
+    setup { mock_app :except => "/foo" }
+
+    should 'redirect to HTTPS for /login' do
       get 'http://www.example.org/login'
       assert_equal 301, last_response.status
       assert_equal 'https://www.example.org/login', last_response.location
     end
-    
-    should 'respond not redirect ssl requests' do
-      get 'http://www.example.org/landing/'
+
+    should 'not redirect for /foo' do
+      get 'http://www.example.org/foo/'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
   end
-  
-  context 'that has array of regex pattern & path as except option' do
-    setup { mock_app :except => [/\.rss$/, "/landing"] }
-    
-    should 'respond with a ssl redirect for /login path' do
-      get 'http://www.example.org/login'
+
+  context ':except (Array)' do
+    setup { mock_app :except => [/^\/foo/, "/bar"] }
+
+    should 'redirect to HTTPS for /admin' do
+      get 'http://www.example.org/admin'
       assert_equal 301, last_response.status
-      assert_equal 'https://www.example.org/login', last_response.location
+      assert_equal 'https://www.example.org/admin', last_response.location
     end
-    
-    should 'respond not redirect ssl redirect for /*.rss path' do
-      get 'http://www.example.org/users.rss'
+
+    should 'not redirect for /foo' do
+      get 'http://www.example.org/foo'
       assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
     end
-    
-    should 'respond not redirect ssl requests' do
-      get 'http://www.example.org/landing/'
+
+    should 'not redirect for /bar' do
+      get 'http://www.example.org/bar'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
   end
-  
-  context 'that has array of regex pattern & path as except option with strict option' do
-    setup { mock_app :except => [/\.rss/, "/landing"], :strict => true }
-    
-    should 'respond with a http redirect from non-allowed https url' do
+
+  context ':except & :strict == true' do
+    setup { mock_app :except => "/foo", :strict => true }
+
+    should 'redirect to HTTP for /foo' do
       get 'https://www.example.org/foo/'
+      assert_equal 301, last_response.status
+      assert_equal 'http://www.example.org/foo/', last_response.location
+    end
+
+    should 'not redirect for /login' do
+      get 'https://www.example.org/login'
       assert_equal 200, last_response.status
       assert_equal 'Hello world!', last_response.body
     end
-    
-    should 'respond from allowed https url' do
-      get 'https://www.example.org/landing'
+  end
+
+  context ':only_hosts (Regex)' do
+    setup { mock_app :only_hosts => /[www|api]\.example\.co\.uk$/ }
+
+    should 'redirect to HTTPS for www.example.co.uk' do
+      get 'http://www.example.co.uk'
       assert_equal 301, last_response.status
-      assert_equal 'http://www.example.org/landing', last_response.location
-    end
-    
-    should 'use default https port when redirecting non-standard ssl port to http' do
-      get 'https://example.org:81/landing', {}, { 'rack.url_scheme' => 'https' }
-      assert_equal 301, last_response.status
-      assert_equal 'http://example.org/landing', last_response.location
+      assert_equal 'https://www.example.co.uk/', last_response.location
     end
 
-    should 'secure cookies' do
-      get 'https://www.example.org/login'
-      assert_equal ["id=1; path=/; secure", "token=abc; path=/; secure; HttpOnly"], last_response.headers['Set-Cookie'].split("\n")
+    should 'redirect to HTTPS for api.example.co.uk' do
+      get 'http://api.example.co.uk'
+      assert_equal 301, last_response.status
+      assert_equal 'https://api.example.co.uk/', last_response.location
     end
-    
-    should 'not secure cookies' do
-      get 'http://www.example.org/landing'
-      assert_equal ["id=1; path=/", "token=abc; path=/; secure; HttpOnly"], last_response.headers['Set-Cookie'].split("\n")
+
+    should 'not redirect for goo.example.co.uk' do
+      get 'http://goo.example.co.uk'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for goo.example.co.uk for goo.example.co.uk' do
+      get 'http://teambox.example.co.uk'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
     end
   end
 
-  
-  context 'that has hsts options set' do
-    setup { mock_app :hsts => {:expires => '500', :subdomains => false} }
-    
+  context ':only_hosts (String)' do
+    setup { mock_app :only_hosts => "example.org" }
+
+    should 'redirect to HTTPS for example.org' do
+      get 'http://example.org'
+      assert_equal 301, last_response.status
+      assert_equal 'https://example.org/', last_response.location
+    end
+
+    should 'not redirect for www.example.org' do
+      get 'http://www.example.org'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for example.com' do
+      get 'http://www.example.com'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':only_hosts (Array)' do
+    setup { mock_app :only_hosts => [/[www|api]\.example\.org$/, "example.com"] }
+
+    should 'redirect to HTTPS for www.example.org' do
+      get 'http://www.example.org'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/', last_response.location
+    end
+
+    should 'redirect to HTTPS for api.example.org' do
+      get 'http://api.example.org'
+      assert_equal 301, last_response.status
+      assert_equal 'https://api.example.org/', last_response.location
+    end
+
+    should 'not redirect for goo.example.com' do
+      get 'http://goo.example.com'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for example.org' do
+      get 'http://example.org'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for goo.example.org' do
+      get 'http://goo.example.org'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':except_hosts (Regex)' do
+    setup { mock_app :except_hosts => /[www|api]\.example\.co\.uk$/ }
+
+    should 'redirect to HTTPS for goo.example.co.uk' do
+      get 'http://goo.example.co.uk'
+      assert_equal 301, last_response.status
+      assert_equal 'https://goo.example.co.uk/', last_response.location
+    end
+
+    should 'not redirect for www.example.co.uk' do
+      get 'http://api.example.co.uk'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for api.example.co.uk' do
+      get 'http://api.example.co.uk'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':except_hosts (String)' do
+    setup { mock_app :except_hosts => "www.example.org" }
+
+    should 'redirect to HTTPS for api.example.org' do
+      get 'http://api.example.org'
+      assert_equal 301, last_response.status
+      assert_equal 'https://api.example.org/', last_response.location
+    end
+
+    should 'not redirect for www.example.org' do
+      get 'http://www.example.org'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':except_hosts (Array)' do
+    setup { mock_app :except_hosts => ["www.example.com", "example.com"] }
+
+    should 'redirect to HTTPS for *.example.org' do
+      get 'http://api.example.org'
+      assert_equal 301, last_response.status
+      assert_equal 'https://api.example.org/', last_response.location
+    end
+
+    should 'not redirect for www.example.com' do
+      get "http://www.example.com"
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for example.com' do
+      get "http://example.com"
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':only_hosts & :only' do
+    setup { mock_app :only_hosts => "example.org", :only => '/foo' }
+
+    should 'redirect to HTTPS for example.org/foo' do
+      get 'http://example.org/foo'
+      assert_equal 301, last_response.status
+      assert_equal 'https://example.org/foo', last_response.location
+    end
+
+    should 'not redirect for example.org/bar' do
+      get 'http://example.org/bar'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for www.example.org' do
+      get 'http://www.example.org'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for www.example.org/foo' do
+      get 'http://www.example.org/foo'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for www.example.org/bar' do
+      get 'http://www.example.org/bar'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':only_hosts & :except' do
+    setup { mock_app :only_hosts => "example.org", :except => '/foo' }
+
+    should 'redirect to HTTPS for example.org/bar' do
+      get 'http://example.org/bar'
+      assert_equal 301, last_response.status
+      assert_equal 'https://example.org/bar', last_response.location
+    end
+
+    should 'not redirect for example.org/foo' do
+      get 'http://example.org/foo'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for www.example.org' do
+      get 'http://www.example.org'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for www.example.org/bar' do
+      get 'http://www.example.org/bar'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for www.example.org/foo' do
+      get 'http://www.example.org/foo'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':except_hosts & :only' do
+    setup { mock_app :except_hosts => "example.org", :only => '/foo' }
+
+    should 'redirect to HTTPS for example.com/foo' do
+      get 'http://example.com/foo'
+      assert_equal 301, last_response.status
+      assert_equal 'https://example.com/foo', last_response.location
+    end
+
+    should 'not redirect for example.org/foo' do
+      get 'http://example.org/foo'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for example.com/bar' do
+      get 'http://example.com/bar'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'redirect to HTTPS for www.example.org/foo' do
+      get 'http://www.example.org/foo'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/foo', last_response.location
+    end
+
+    should 'not redirect for www.example.org/bar' do
+      get 'http://www.example.org/bar'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':except_hosts & :except' do
+    setup { mock_app :except_hosts => "example.org", :except => '/foo' }
+
+    should 'redirect to HTTPS for example.com/bar' do
+      get 'http://example.com/bar'
+      assert_equal 301, last_response.status
+      assert_equal 'https://example.com/bar', last_response.location
+    end
+
+    should 'not redirect for example.org/foo' do
+      get 'http://example.org/foo'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for example.org/bar' do
+      get 'http://example.org/bar'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for example.com/foo' do
+      get 'http://example.com/foo'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'redirect to HTTPS for www.example.org/bar' do
+      get 'http://www.example.org/bar'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/bar', last_response.location
+    end
+
+    should 'not redirect for www.example.org/foo' do
+      get 'http://www.example.org/foo'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':except_hosts & :hsts == true & :strict == true' do
+    setup { mock_app :except_hosts => /[www|api]\.example\.org$/, :hsts => true, :strict => true }
+
+    should 'redirect to HTTP for www.example.org' do
+      get 'https://www.example.org/'
+      assert_equal 301, last_response.status
+      assert_equal 'http://www.example.org/', last_response.location
+    end
+
+    should 'not redirect for abc.example.org' do
+      get 'https://abc.example.org/'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not set hsts for www.example.org (HTTP)' do
+      get 'http://www.example.org/'
+      assert !last_response.headers["Strict-Transport-Security"]
+    end
+
+    should 'not set hsts for www.example.org (HTTPS)' do
+      get 'https://www.example.org/'
+      assert !last_response.headers["Strict-Transport-Security"]
+    end
+
+    should 'not set hsts for abc.example.org (HTTP)' do
+      get 'http://abc.example.org/'
+      assert !last_response.headers["Strict-Transport-Security"]
+    end
+
+    should 'not set hsts for abc.example.org (HTTPS)' do
+      get 'https://abc.example.org/'
+      assert !last_response.headers["Strict-Transport-Security"]
+    end
+  end
+
+  context ':only == [] & :strict == true' do
+    setup { mock_app :only => [], :strict => true }
+
+    should 'not redirect for /foo (HTTP)' do
+      get 'http://www.example.org/foo'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'redirect to HTTP for /users.xml' do
+      get 'https://www.example.org/users.xml'
+      assert_equal 301, last_response.status
+      assert_equal 'http://www.example.org/users.xml', last_response.location
+    end
+  end
+
+  context ':only == nil & :strict = true' do
+    setup { mock_app :only => nil, :strict => true }
+
+    should 'redirect to HTTP for /users.xml' do
+      get 'http://www.example.org/foo'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/foo', last_response.location
+    end
+
+    should 'not redirect for /users.xml' do
+      get 'https://www.example.org/users.xml'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':mixed' do
+    setup { mock_app :only => [/^\/users\/(.+)\/edit/], :mixed => true }
+
+    should 'redirect to HTTPS for /foo' do
+      get 'https://www.example.org/foo/'
+      assert_equal 301, last_response.status
+      assert_equal 'http://www.example.org/foo/', last_response.location
+    end
+
+    should 'not redirect for GET /users/123/edit' do
+      get 'https://www.example.org/users/123/edit'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'redirect to HTTPS for POST /users/123/edit' do
+      post 'http://www.example.org/users/123/edit'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/users/123/edit', last_response.location
+    end
+
+    should 'redirect to HTTPS for PUT /users/123/edit' do
+      put 'http://www.example.org/users/123/edit'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/users/123/edit', last_response.location
+    end
+  end
+
+  context ':hsts' do
+    setup { mock_app :hsts => { :expires => '500', :subdomains => false } }
+
     should 'set expiry option' do
       get 'https://www.example.org/'
-      assert_equal "max-age=500", last_response.headers["Strict-Transport-Security"] 
+      assert_equal "max-age=500", last_response.headers["Strict-Transport-Security"]
     end
-    
+
     should 'not include subdomains' do
       get 'https://www.example.org/'
       assert !last_response.headers["Strict-Transport-Security"].include?("includeSubDomains")
     end
   end
-  
+
+  context ':force_secure_cookie == false' do
+    setup { mock_app :force_secure_cookies => false }
+
+    should 'not secure cookies but warn the user of the consequences' do
+      get 'https://www.example.org/users/123/edit'
+      assert_equal ["id=1; path=/", "token=abc; path=/; secure; HttpOnly"], last_response.headers['Set-Cookie'].split("\n")
+    end
+  end
+
+  context ':only_methods' do
+    setup { mock_app :only_methods => 'POST' }
+
+    should 'redirect to HTTPS for POST request' do
+      post 'http://www.example.org/'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/', last_response.location
+    end
+
+    should 'not redirect for PUT request' do
+      put 'http://www.example.org/'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+
+    should 'not redirect for GET request' do
+      get 'http://www.example.org/'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
+  context ':except_methods option' do
+    setup { mock_app :except_methods => 'GET' }
+
+    should 'redirect to HTTPS for POST request' do
+      post 'http://www.example.org/'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/', last_response.location
+    end
+
+    should 'redirect to HTTPS for PUT request' do
+      post 'http://www.example.org/'
+      assert_equal 301, last_response.status
+      assert_equal 'https://www.example.org/', last_response.location
+    end
+
+    should 'not redirect for GET request' do
+      get 'http://www.example.org/'
+      assert_equal 200, last_response.status
+      assert_equal 'Hello world!', last_response.body
+    end
+  end
+
 end
