@@ -70,7 +70,7 @@ module Rack
     
     def redirect_to(location)
       body = "<html><body>You are being <a href=\"#{location}\">redirected</a>.</body></html>"
-      [301, { 'Content-Type' => 'text/html', 'Location' => location }, [body]]
+      [302, { 'Content-Type' => 'text/html', 'Location' => location }, [body]]
     end
 
     def ssl_request?
